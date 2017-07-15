@@ -1,0 +1,224 @@
+---
+title: "Predicting Quality of Exercise from Wearable Trackers"
+author: "Julie Grantier"
+date: "7/14/2017"
+output: html_document
+geometry: margin=2cm
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, eval = FALSE, comment = NA)
+library(ggplot2)
+library(scales)
+library(caret)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(leaps)
+library(randomForest)
+library(rpart)
+library(gbm)
+```
+
+## Introduction
+
+Just doing exercise is important, but to prevent injuries and get the maximum benefit, it is important to do the exercises correctly.  In the past, the only way to ensure correct performance of moves was training and monitoring by an expert like a physical therapist or personal trainer.  A group of scientists (Velloso et al., 2013) became interested in using the different fitness monitoring systems on the market to detect not only the quantity of exercise done by the wearer but also the quantity.
+
+Velloso's team created a dataset of tracking data in which the volunteers did biceps curls both correctly and incorrectly (in four typical ways).  In this paper, we use practical machine learning methods to try to predict whether an exercise was done correctly or not.
+
+## Exploratory Data Analysis and Processing
+
+```{r data_entry, eval =TRUE, echo = TRUE}
+training <- read.csv("pml-training.csv", stringsAsFactors = FALSE, na.string= "")
+test <- read.csv("pml-testing.csv", stringsAsFactors = FALSE, na.string= "")
+```
+ 
+Two datasets were provided. One for training with `r nrow(training)` observations of `r ncol(training)` variables, and one for testing with `r nrow(test)` observations of `r ncol(test)` variables.  These datasets can be found at:
+
+training: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+testing: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+```{r classe, eval =TRUE, echo = TRUE}
+table(training$classe)
+```
+
+The *classe* variable denotes which category the exercise falls in with Class A representing correct performance and the four incorrect methods being: "throwing
+the elbows to the front (Class B), lifting the dumbbell
+only halfway (Class C), lowering the dumbbell only halfway
+(Class D) and throwing the hips to the front (Class E)" (Velloso et al., 2013).
+
+There is a good sized sample of each of the classes.
+
+There are many variables that measure the acceleration, pitch, yaw, roll, and similiar variables of each motion sensor.  On inspection, there are also quite a few variables that have very few observations.  By studying the dataset, we found that each time the *new_window* variable was yes, there were extra columns that seem to be summary statistics for the observations when that window was open. 
+
+```{r new_ window, eval =TRUE, echo = TRUE}
+table_new <- table(training$new_window)
+table_new
+```
+
+These variables only show up in `r table_new[2]` out of `r nrow(training)` observations so are not likely to add significantly to any model. The following code looks for variables that only have values on new windows and eliminates them from the dataset.  Extra time formats and window information was also eliminated from the data. 
+
+```{r extra_variables, eval =TRUE, echo = TRUE}
+training2 <- training[training$new_window =="no",]
+extracol = 1 
+for (i in 1:ncol(training2))
+      if(sum(is.na(training2[,i]))==nrow(training2)){
+            extracol <- rbind(extracol, i)
+      } else {
+            if (sum(training2[,i] == "NA")==nrow(training2)){
+            extracol <- rbind(extracol, i)
+            }
+      }
+extracol <- rbind(extracol, 3,4,6,7) 
+training <- training[,-extracol]
+```
+
+After removing these extraneous variables, the data was checked for any near zero variance (NZV) variables, but there were no more found.
+
+```{r nzv, eval =TRUE, echo = TRUE}
+nearZeroVar(training)
+```
+
+Since the data was read in with no factors, the user name and class were classified as factor variables
+```{r factors, eval =TRUE, echo = TRUE}
+training$user_name <- factor(training$user_name)
+training$classe <- factor(training$classe)
+```
+
+Last we split the data into a training (70%) and validation (30%) set to be able to check the accuracy of our models and estimate out of sample error rate.  User name and time were not used as factors in these models so were removed from the datasets.  
+
+```{r sample, eval =TRUE, echo = TRUE}
+set.seed(77463) 
+inTrain <- createDataPartition(y=training$classe,
+                               p=0.7, list=FALSE)
+train <- training[inTrain,-c(1,2) ]
+
+validate <- training[-inTrain,-c(1,2) ]
+
+```
+
+We were left with `r ncol(train)-1` variables to use in predicting class.
+
+##Modeling
+
+###Linear Model
+
+At first we tried to cut down the number of variables to prevent overfitting.  To look for high correlates with class, but reduce variables that were highly correlated with each other, we used a forward selection linear regression model to select the 20 most useful variables. Please see the Rmarkdown source code for this document at <https://github.com/jgrantier/practicalmachinelearning> to see all of the code for the forward selection.
+
+```{r variable_reduction, eval =TRUE, echo = FALSE}
+
+train_df <- as.data.frame(train)
+
+train_df <- mutate(train_df, classe_int = ifelse(classe=="A", 1,
+                                     ifelse(classe=="B", 2,
+                                            ifelse(classe=="C", 3,
+                                                   ifelse(classe=="D", 4, 5)))))
+
+mod1 <- lm(classe_int~1, data =train_df)
+mod.test1 <- add1(mod1, names(train_df[,1:52]) , test= "F")
+mod2 <- update(mod1, formula=.~.+pitch_forearm)
+mod.test2 <- add1(mod2, names(train_df[,1:52]),test = "F")
+mod3 <- update(mod2, formula=.~.+magnet_belt_y)
+mod.test3 <- add1(mod3, names(train_df[,1:52]),test = "F")
+mod4 <- update(mod3, formula=.~.+total_accel_forearm)
+mod.test4 <- add1(mod4, names(train_df[,1:52]),test = "F")
+mod5 <- update(mod4, formula=.~.+magnet_arm_x)
+mod.test5 <- add1(mod5, names(train_df[,1:52]),test = "F")
+mod6 <- update(mod5, formula=.~.+total_accel_dumbbell)
+mod.test6 <- add1(mod6, names(train_df[,1:52]),test = "F")
+mod7 <- update(mod6, formula=.~.+accel_belt_y          )
+mod.test7 <- add1(mod7, names(train_df[,1:52]),test = "F")
+mod8 <- update(mod7, formula=.~.+total_accel_belt)
+mod.test8 <- add1(mod8, names(train_df[,1:52]),test = "F")
+mod9 <- update(mod8, formula=.~.+pitch_belt)
+mod.test9 <- add1(mod9, names(train_df[,1:52]),test = "F")
+mod10 <- update(mod9, formula=.~.+magnet_dumbbell_z)
+mod.test10 <- add1(mod10, names(train_df[,1:52]) , test= "F")
+mod11 <- update(mod10, formula=.~.+accel_forearm_z )
+mod.test11 <- add1(mod11, names(train_df[,1:52]) , test= "F")
+mod12 <- update(mod11, formula=.~.+magnet_dumbbell_x)
+mod.test12 <- add1(mod12, names(train_df[,1:52]),test = "F")
+mod13 <- update(mod12, formula=.~.+roll_belt)
+mod.test13 <- add1(mod13, names(train_df[,1:52]),test = "F")
+mod14 <- update(mod13, formula=.~.+accel_dumbbell_x)
+mod.test14 <- add1(mod14, names(train_df[,1:52]),test = "F")
+mod15 <- update(mod14, formula=.~.+yaw_dumbbell )
+mod.test15 <- add1(mod15, names(train_df[,1:52]),test = "F")
+mod16 <- update(mod15, formula=.~.+accel_arm_z)
+mod.test16 <- add1(mod16, names(train_df[,1:52]),test = "F")
+mod17 <- update(mod16, formula=.~.+magnet_arm_y          )
+mod.test17 <- add1(mod17, names(train_df[,1:52]),test = "F")
+mod18 <- update(mod17, formula=.~.+accel_arm_x)
+mod.test18 <- add1(mod18, names(train_df[,1:52]),test = "F")
+mod19 <- update(mod18, formula=.~.+magnet_forearm_z)
+mod.test19 <- add1(mod19, names(train_df[,1:52]),test = "F")
+mod20 <- update(mod19, formula=.~.+gyros_arm_x)
+```
+
+```{r lm_model, eval =TRUE, echo = TRUE}
+summary(mod20)
+
+train3 <- train[,which(names(train) %in% c(names(mod20[[1]]),"classe"))]
+
+```
+
+This model only explains `r round(100*summary(mod20)$r.squared,2)` percent of the variance in the training set, probably because the relationship with the most important predictors is not linear, but we kept this smaller dataset to test with other models to see if this subset would be sufficient for predictions, since it cuts down on variables that correlated with each other and, if sufficient, may run faster than the full set.
+
+###Random Tree
+
+Since the poor performance of the linear model suggests the relationship is not linear, we next looked at a random tree model.
+
+```{r rt_model, eval =TRUE, echo = TRUE}
+modFit_rt <- train(classe ~ .,method="rpart",data=train)
+predictions_rt <- predict(modFit_rt,newdata=validate)
+conMat_rt <- confusionMatrix(predictions_rt,validate$classe)
+conMat_rt
+plot(predictions_rt,validate$classe, main="Predictions for Random Tree Model", xlab = "Predictions", ylab = "Actual from Validation Set")
+```
+
+This model also did quite poorly, with an accuracy of only `r round(100*modFit_rt$results[1,2],2)` percent on the training set and `r round(100*conMat_rt$overall[1],2)` percent on the validation set for the entire set of 52 variables.
+
+###Boosting and Random Forests
+
+Since the simple models do not seem to be adequate in modeling the data or making predictions, we needed to use more complex modeling techniques and used both a boosting method with trees (`caret` `gbm`) and random forest (`randomForest`).  
+
+```{r boost_forest, eval =TRUE, echo = TRUE}
+modFit_rf <- randomForest(classe ~., data=train)
+predictions_rf.val <- predict(modFit_rf,newdata=validate)
+conMat_rf <- confusionMatrix(predictions_rf.val,validate$classe)
+conMat_rf
+
+modFit_rf_small <- randomForest(classe ~., data=train3)
+predictions_rf_small.val <- predict(modFit_rf_small,newdata=validate)
+conMat_rf_small <- confusionMatrix(predictions_rf_small.val,validate$classe)
+conMat_rf_small
+
+modFit_gbm_small <- train(classe ~ .,method="gbm",data=train3, verbose = FALSE)
+predictions_gbm_small.val <- predict(modFit_gbm_small,newdata=validate)
+conMat_gbm_small <- confusionMatrix(predictions_gbm_small.val,validate$classe)
+conMat_gbm_small
+```
+
+The Random Forest model did much better predicting the validate set with `r round(100*conMat_rf$overall[1],2)` percent accuracy for the full set of variable and with `r round(100*conMat_rf_small$overall[1],2)` percent for the set of 20 variables.  These numbers are quite similar suggesting there is not too much overfitting by the larger model, but that the smaller should be sufficient. Due to computing limitations, the Boosted model was only run on the smaller dataset. It did not do quite as well with `r round(100*conMat_gbm_small$overall[1],2)` percent accuracy for the set of 20 variables.
+
+
+##Conclusions
+```{r test_predictions, eval =TRUE, echo = TRUE}
+test <- test[,-c(1,2,extracol)]
+predictions_rf.test <- predict(modFit_rf,newdata=test)
+```
+
+The best model for this data turned out to be the Random Forest model with all 52 variables.  The expected out of sample error was estimated from the validation sample to be `r 1-round(100*conMat_rf$overall[1],2)`.  This model predicted the small testing set from the study with 100% accuracy (according to the Coursera Practical Machine Learning exam).
+
+```{r plots, eval =TRUE, echo = TRUE}
+plot(modFit_rf, main = "Final Random Forest Model", sub="Number of Trees vs Error")
+plot(predictions_rf.val,validate$classe, main = "Predictions for Final Random Forest Model", xlab = "Predictions", ylab = "Actual from Validation Set")
+```
+
+###References
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. <http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf>
+Read more at: <http://groupware.les.inf.puc-rio.br/har#ixzz4mo1EE6hf>
+
+Coursera Practical Machine Learning Class with Jeff Leek, Roger Peng and Brian Caffo, Johns Hopkins University <https://www.coursera.org/learn/practical-machine-learning>
